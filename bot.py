@@ -63,7 +63,7 @@ class StreakBot(commands.Bot):
         
         credit_voice_loop.start()
         midnight_dimmer_loop.start()
-        auto_backup_loop.start()  # Запуск автосохранения базы
+        auto_backup_loop.start()
 
 bot = StreakBot()
 
@@ -281,14 +281,11 @@ async def midnight_dimmer_loop() -> None:
 async def before_midnight_dimmer_loop() -> None:
     await bot.wait_until_ready()
 
-# АВТОСОХРАНЕНИЕ БАЗЫ ДАННЫХ
 @tasks.loop(hours=24)
 async def auto_backup_loop() -> None:
-    await asyncio.sleep(60) # Ждем прогрузки базы при старте
-
+    await asyncio.sleep(60)
     db_path = Path(__file__).with_name("streaks.db")
     backup_dir = Path(__file__).with_name("backups")
-    
     backup_dir.mkdir(exist_ok=True)
     today_str = datetime.now().strftime("%Y-%m-%d")
     backup_path = backup_dir / f"streaks_backup_{today_str}.db"
@@ -296,20 +293,90 @@ async def auto_backup_loop() -> None:
     try:
         shutil.copy2(db_path, backup_path)
         log.info(f"✅ Автобэкап базы данных создан: {backup_path.name}")
-
-        # Удаляем бэкапы старше 7 дней
         for file in backup_dir.glob("streaks_backup_*.db"):
             file_age_days = (datetime.now() - datetime.fromtimestamp(file.stat().st_mtime)).days
             if file_age_days > 7:
                 file.unlink()
                 log.info(f"🗑️ Удален старый бэкап: {file.name}")
-                
     except Exception as e:
         log.error(f"❌ Ошибка при создании автобэкапа: {e}")
 
 @auto_backup_loop.before_loop
 async def before_auto_backup_loop() -> None:
     await bot.wait_until_ready()
+
+# --- ПАГИНАЦИЯ ЛИДЕРБОРДА ---
+class LeaderboardView(discord.ui.View):
+    def __init__(self, entries: list[db.Streak], guild: discord.Guild, author_id: int):
+        super().__init__(timeout=120)  # Кнопки будут работать 2 минуты
+        self.entries = entries
+        self.guild = guild
+        self.author_id = author_id
+        self.page = 0
+        self.per_page = 10
+        self.max_page = max(0, (len(entries) - 1) // self.per_page)
+
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.prev_button.disabled = (self.page == 0)
+        self.next_button.disabled = (self.page >= self.max_page)
+
+    def build_embed(self) -> discord.Embed:
+        start = self.page * self.per_page
+        end = start + self.per_page
+        page_entries = self.entries[start:end]
+
+        lines = []
+        for i, streak in enumerate(page_entries, start=start + 1):
+            member = self.guild.get_member(streak.user_id)
+            name = member.mention if member else f"`{streak.user_id}`"
+            lines.append(f"**{i}.** {emoji_for(streak.count)} **{streak.count}** — {name}")
+
+        embed = discord.Embed(
+            title=texts.LEADERBOARD_TITLE,
+            description="\n".join(lines),
+            color=discord.Color.orange()
+        )
+        embed.set_footer(text=f"{texts.LEADERBOARD_FOOTER} | Страница {self.page + 1} из {self.max_page + 1}")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Вы не можете листать чужой лидерборд. Напишите `/leaderboard`, чтобы открыть свой.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Назад", style=discord.ButtonStyle.secondary)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="Вперед", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page += 1
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+@ru_command("leaderboard")
+async def leaderboard_command(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message(guild_only_response(), ephemeral=True)
+        return
+    await interaction.response.defer()
+    
+    # Мы запрашиваем сразу много людей. Если у тебя лимит в db.py стоит 15, лучше изменить на 1000, чтобы кнопки работали для всех
+    entries = await db.list_active_streaks(interaction.guild.id, today(), limit=1000)
+    
+    if not entries:
+        await interaction.followup.send(texts.LEADERBOARD_EMPTY)
+        return
+
+    view = LeaderboardView(entries, interaction.guild, interaction.user.id)
+    await interaction.followup.send(embed=view.build_embed(), view=view)
+
+# --- ОСТАЛЬНЫЕ КОМАНДЫ ---
 
 @ru_command("streak")
 @app_commands.describe(user=texts.PARAMS["streak_user"])
@@ -364,30 +431,6 @@ async def showstreak_command(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(texts.SHOWN.format(emoji=emoji_for(streak.count), count=streak.count), ephemeral=True)
         return
     await interaction.response.send_message(f"{streak_text(streak, 3, 180)}\n{texts.NICK_PERMISSION}", ephemeral=True)
-
-@ru_command("leaderboard")
-async def leaderboard_command(interaction: discord.Interaction) -> None:
-    if interaction.guild is None:
-        await interaction.response.send_message(guild_only_response(), ephemeral=True)
-        return
-    await interaction.response.defer()
-    entries = await db.list_active_streaks(interaction.guild.id, today())
-    if not entries:
-        await interaction.followup.send(texts.LEADERBOARD_EMPTY)
-        return
-    lines: list[str] = []
-    for index, streak in enumerate(entries, start=1):
-        member = interaction.guild.get_member(streak.user_id)
-        if member is None:
-            try:
-                member = await interaction.guild.fetch_member(streak.user_id)
-            except (discord.NotFound, discord.HTTPException):
-                member = None
-        name = member.mention if member else f"`{streak.user_id}`"
-        lines.append(f"**{index}.** {emoji_for(streak.count)} **{streak.count}** — {name}")
-    embed = discord.Embed(title=texts.LEADERBOARD_TITLE, description="\n".join(lines), color=discord.Color.orange())
-    embed.set_footer(text=texts.LEADERBOARD_FOOTER)
-    await interaction.followup.send(embed=embed)
 
 @ru_command("setstreak")
 @app_commands.describe(user=texts.PARAMS["set_user"], flames=texts.PARAMS["set_flames"])

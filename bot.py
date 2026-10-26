@@ -29,7 +29,7 @@ from streaks import (
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GUILD_ID = os.getenv("DISCORD_GUILD_ID", "").strip()
+GUILD_ID = "1268643259844919326"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("streak-bot")

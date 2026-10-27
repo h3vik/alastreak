@@ -29,7 +29,7 @@ from streaks import (
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
-GUILD_ID = "1268643259844919326"
+GUILD_ID = os.getenv("DISCORD_GUILD_ID", "").strip()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("streak-bot")
@@ -284,8 +284,12 @@ async def before_midnight_dimmer_loop() -> None:
 @tasks.loop(hours=24)
 async def auto_backup_loop() -> None:
     await asyncio.sleep(60)
-    db_path = Path(__file__).with_name("streaks.db")
-    backup_dir = Path(__file__).with_name("backups")
+    
+    # Теперь бэкапы сохраняются в ту же папку data
+    DATA_DIR = os.getenv("DATA_DIR", ".")
+    db_path = Path(DATA_DIR) / "streaks.db"
+    backup_dir = Path(DATA_DIR) / "backups"
+    
     backup_dir.mkdir(exist_ok=True)
     today_str = datetime.now().strftime("%Y-%m-%d")
     backup_path = backup_dir / f"streaks_backup_{today_str}.db"
@@ -305,17 +309,15 @@ async def auto_backup_loop() -> None:
 async def before_auto_backup_loop() -> None:
     await bot.wait_until_ready()
 
-# --- ПАГИНАЦИЯ ЛИДЕРБОРДА ---
 class LeaderboardView(discord.ui.View):
     def __init__(self, entries: list[db.Streak], guild: discord.Guild, author_id: int):
-        super().__init__(timeout=120)  # Кнопки будут работать 2 минуты
+        super().__init__(timeout=120)
         self.entries = entries
         self.guild = guild
         self.author_id = author_id
         self.page = 0
         self.per_page = 10
         self.max_page = max(0, (len(entries) - 1) // self.per_page)
-
         self.update_buttons()
 
     def update_buttons(self):
@@ -330,7 +332,12 @@ class LeaderboardView(discord.ui.View):
         lines = []
         for i, streak in enumerate(page_entries, start=start + 1):
             member = self.guild.get_member(streak.user_id)
-            name = member.mention if member else f"`{streak.user_id}`"
+            if member:
+                # Убираем лишний огонек из ника, чтобы не было дубля
+                clean_name = strip_prefix(member.display_name)
+                name = f"**{clean_name}**"
+            else:
+                name = f"`{streak.user_id}`"
             lines.append(f"**{i}.** {emoji_for(streak.count)} **{streak.count}** — {name}")
 
         embed = discord.Embed(
@@ -343,7 +350,7 @@ class LeaderboardView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Вы не можете листать чужой лидерборд. Напишите `/leaderboard`, чтобы открыть свой.", ephemeral=True)
+            await interaction.response.send_message("Вы не можете листать чужой лидерборд.", ephemeral=True)
             return False
         return True
 
@@ -366,7 +373,6 @@ async def leaderboard_command(interaction: discord.Interaction) -> None:
         return
     await interaction.response.defer()
     
-    # Мы запрашиваем сразу много людей. Если у тебя лимит в db.py стоит 15, лучше изменить на 1000, чтобы кнопки работали для всех
     entries = await db.list_active_streaks(interaction.guild.id, today(), limit=1000)
     
     if not entries:
@@ -375,8 +381,6 @@ async def leaderboard_command(interaction: discord.Interaction) -> None:
 
     view = LeaderboardView(entries, interaction.guild, interaction.user.id)
     await interaction.followup.send(embed=view.build_embed(), view=view)
-
-# --- ОСТАЛЬНЫЕ КОМАНДЫ ---
 
 @ru_command("streak")
 @app_commands.describe(user=texts.PARAMS["streak_user"])
@@ -642,11 +646,11 @@ async def roleslist_command(interaction: discord.Interaction) -> None:
         return
     lines = []
     for days, role_ids in sorted(roles_dict.items()):
-        role_mentions = []
+        days_roles = []
         for rid in role_ids:
             r = interaction.guild.get_role(rid)
-            role_mentions.append(r.mention if r else "`удалена`")
-        lines.append(f"🔥 **{days}** дней — {', '.join(role_mentions)}")
+            days_roles.append(r.mention if r else "`удалена`")
+        lines.append(f"🔥 **{days}** дней — {', '.join(days_roles)}")
     body = "🎭 **Награды за стрики:**\n" + "\n".join(lines)
     await interaction.response.send_message(body, ephemeral=True)
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
 import aiosqlite
 
-DB_PATH = Path(__file__).with_name("streaks.db")
+# Ищем переменную DATA_DIR, которую дает хостинг для постоянного хранения
+DATA_DIR = os.getenv("DATA_DIR", ".")
+DB_PATH = Path(DATA_DIR) / "streaks.db"
 
 _NEW_COLUMNS = (
     ("progress_date", "TEXT"),
@@ -75,8 +78,6 @@ async def init() -> None:
             )
             """
         )
-        
-        # Таблица для наград-ролей (теперь составной первичный ключ позволяет много ролей)
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS streak_roles (
@@ -197,7 +198,6 @@ async def save_guild_settings(settings: GuildSettings) -> None:
         )
         await db.commit()
 
-# Возвращает словарь {дни: [список ролей]}
 async def get_all_streak_roles(guild_id: int) -> dict[int, list[int]]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT days, role_id FROM streak_roles WHERE guild_id = ?", (guild_id,)) as cursor:

@@ -64,6 +64,7 @@ class StreakBot(commands.Bot):
         credit_voice_loop.start()
         midnight_dimmer_loop.start()
         auto_backup_loop.start()
+        unbound_decay_loop.start()
 
 bot = StreakBot()
 
@@ -101,7 +102,9 @@ async def apply_nickname(member: discord.Member, streak, visible: bool) -> bool:
             return await try_set_nickname(member, base)
         return True
         
-    if streak.count <= 0:
+    if streak.is_frozen:
+        desired = format_nickname(base, streak.count, state="frozen")
+    elif streak.count <= 0:
         if is_streak_restorable(streak, now_date):
             desired = format_nickname(base, streak.last_lost_count, state="lost")
         else:
@@ -267,7 +270,7 @@ async def midnight_dimmer_loop() -> None:
             if member.bot or guild.owner_id == member.id:
                 continue
             streak = await db.get_streak(guild.id, member.id)
-            if streak.nickname_visible:
+            if streak.nickname_visible and not streak.is_frozen:
                 if streak.count > 0 and streak.last_active != now_date:
                     if member.nick and not member.nick.startswith("🔘"):
                         await apply_nickname(member, streak, True)
@@ -281,11 +284,41 @@ async def midnight_dimmer_loop() -> None:
 async def before_midnight_dimmer_loop() -> None:
     await bot.wait_until_ready()
 
+@tasks.loop(minutes=30)
+async def unbound_decay_loop() -> None:
+    now_date = today()
+    import aiosqlite
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("SELECT * FROM streaks WHERE is_frozen = 1") as cursor:
+            rows = await cursor.fetchall()
+            
+        for row in rows:
+            streak = db.streak_from_row(row)
+            if streak.progress_date != now_date:
+                streak.count -= 1
+                streak.progress_date = now_date
+                
+                if streak.count <= 0:
+                    streak.is_frozen = False
+                    streak.count = 0
+                    
+                await db.save_streak(streak)
+                
+                guild = bot.get_guild(streak.guild_id)
+                if guild:
+                    member = guild.get_member(streak.user_id)
+                    if member and streak.nickname_visible:
+                        await apply_nickname(member, streak, True)
+                        await asyncio.sleep(5)
+
+@unbound_decay_loop.before_loop
+async def before_unbound_decay_loop() -> None:
+    await bot.wait_until_ready()
+
 @tasks.loop(hours=24)
 async def auto_backup_loop() -> None:
     await asyncio.sleep(60)
-    
-    # Теперь бэкапы сохраняются в ту же папку data
     DATA_DIR = os.getenv("DATA_DIR", ".")
     db_path = Path(DATA_DIR) / "streaks.db"
     backup_dir = Path(DATA_DIR) / "backups"
@@ -308,6 +341,77 @@ async def auto_backup_loop() -> None:
 @auto_backup_loop.before_loop
 async def before_auto_backup_loop() -> None:
     await bot.wait_until_ready()
+
+class UnboundView(discord.ui.View):
+    def __init__(self, streak: db.Streak, member: discord.Member):
+        super().__init__(timeout=None)
+        self.streak = streak
+        self.member = member
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.toggle_button.disabled = (self.streak.count <= 1 and not self.streak.is_frozen)
+        if self.streak.is_frozen:
+            self.toggle_button.label = "🔥 Разжечь (Вернуться к обычному стрику)"
+            self.toggle_button.style = discord.ButtonStyle.danger
+        else:
+            self.toggle_button.label = "❄️ Заморозить (Утечка -1 в день)"
+            self.toggle_button.style = discord.ButtonStyle.primary
+
+    def build_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="❄️ Управление заморозкой",
+            color=discord.Color.blue() if self.streak.is_frozen else discord.Color.orange()
+        )
+        if self.streak.is_frozen:
+            embed.description = (
+                f"Ваш стрик **заморожен**. Обычная активность не добавляет огоньки.\n"
+                f"Каждый день (по UTC) сгорает **1 огонек**.\n\n"
+                f"Текущий запас: **{emoji_for(self.streak.count)} {self.streak.count}**\n"
+                f"Завтра останется: **{self.streak.count - 1 if self.streak.count > 0 else 0}**"
+            )
+        else:
+            embed.description = (
+                f"Ваш стрик: **{emoji_for(self.streak.count)} {self.streak.count}**\n\n"
+                f"**Заморозка** позволит вам не потерять серию, если вы уезжаете или не можете писать.\n"
+                f"⚠️ Но каждый день будет сгорать по **1 огоньку**.\n"
+                f"Как только огоньки закончатся, серия сгорит."
+            )
+        return embed
+
+    @discord.ui.button(label="Загрузка...", style=discord.ButtonStyle.primary)
+    async def toggle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.member.id:
+            await interaction.response.send_message("Это не ваша заморозка.", ephemeral=True)
+            return
+
+        self.streak.is_frozen = not self.streak.is_frozen
+        if self.streak.is_frozen:
+            self.streak.progress_date = today()
+        else:
+            self.streak.last_active = today()
+            
+        await db.save_streak(self.streak)
+        await apply_nickname(self.member, self.streak, self.streak.nickname_visible)
+        
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+@ru_command("streakunbound")
+async def unbound_command(interaction: discord.Interaction) -> None:
+    if interaction.guild is None:
+        await interaction.response.send_message(guild_only_response(), ephemeral=True)
+        return
+        
+    member = interaction.user
+    streak = await db.get_streak(interaction.guild.id, member.id)
+    
+    if streak.count <= 0:
+        await interaction.response.send_message("У вас нет активного стрика, который можно заморозить.", ephemeral=True)
+        return
+        
+    view = UnboundView(streak, member)
+    await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
 
 class LeaderboardView(discord.ui.View):
     def __init__(self, entries: list[db.Streak], guild: discord.Guild, author_id: int):
@@ -333,12 +437,13 @@ class LeaderboardView(discord.ui.View):
         for i, streak in enumerate(page_entries, start=start + 1):
             member = self.guild.get_member(streak.user_id)
             if member:
-                # Убираем лишний огонек из ника, чтобы не было дубля
                 clean_name = strip_prefix(member.display_name)
                 name = f"**{clean_name}**"
             else:
                 name = f"`{streak.user_id}`"
-            lines.append(f"**{i}.** {emoji_for(streak.count)} **{streak.count}** — {name}")
+                
+            frozen_icon = " ❄️" if streak.is_frozen else ""
+            lines.append(f"**{i}.** {emoji_for(streak.count)} **{streak.count}**{frozen_icon} — {name}")
 
         embed = discord.Embed(
             title=texts.LEADERBOARD_TITLE,
@@ -454,6 +559,7 @@ async def setstreak_command(interaction: discord.Interaction, user: discord.Memb
         streak.progress_date = today()
         streak.lost_date = None
         streak.last_lost_count = 0
+        streak.is_frozen = False
         settings = await db.get_guild_settings(interaction.guild.id)
         streak.messages_today = settings.message_goal
         streak.voice_seconds_today = 0

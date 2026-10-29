@@ -7,7 +7,6 @@ from pathlib import Path
 
 import aiosqlite
 
-# Ищем переменную DATA_DIR, которую дает хостинг для постоянного хранения
 DATA_DIR = os.getenv("DATA_DIR", ".")
 DB_PATH = Path(DATA_DIR) / "streaks.db"
 
@@ -19,6 +18,8 @@ _NEW_COLUMNS = (
     ("restore_uses_count", "INTEGER NOT NULL DEFAULT 0"),
     ("last_lost_count", "INTEGER NOT NULL DEFAULT 0"),
     ("lost_date", "TEXT"),
+    ("is_frozen", "INTEGER NOT NULL DEFAULT 0"), # НОВОЕ
+    ("frozen_count", "INTEGER NOT NULL DEFAULT 0"), # НОВОЕ
 )
 
 @dataclass
@@ -35,6 +36,8 @@ class Streak:
     restore_uses_count: int = 0
     last_lost_count: int = 0
     lost_date: date | None = None
+    is_frozen: bool = False # НОВОЕ
+    frozen_count: int = 0 # НОВОЕ
 
 @dataclass
 class GuildSettings:
@@ -59,6 +62,8 @@ async def init() -> None:
                 restore_uses_count INTEGER NOT NULL DEFAULT 0,
                 last_lost_count INTEGER NOT NULL DEFAULT 0,
                 lost_date TEXT,
+                is_frozen INTEGER NOT NULL DEFAULT 0,
+                frozen_count INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (guild_id, user_id)
             )
             """
@@ -108,6 +113,8 @@ def streak_from_row(row: aiosqlite.Row) -> Streak:
         restore_uses_count=int(row["restore_uses_count"] or 0) if "restore_uses_count" in keys else 0,
         last_lost_count=int(row["last_lost_count"] or 0) if "last_lost_count" in keys else 0,
         lost_date=_parse_date(row["lost_date"]) if "lost_date" in keys else None,
+        is_frozen=bool(row["is_frozen"]) if "is_frozen" in keys else False,
+        frozen_count=int(row["frozen_count"] or 0) if "frozen_count" in keys else 0,
     )
 
 async def get_streak(guild_id: int, user_id: int) -> Streak:
@@ -130,9 +137,10 @@ async def save_streak(streak: Streak) -> None:
             INSERT INTO streaks (
                 guild_id, user_id, count, last_active, nickname_visible,
                 progress_date, messages_today, voice_seconds_today,
-                restore_uses_month, restore_uses_count, last_lost_count, lost_date
+                restore_uses_month, restore_uses_count, last_lost_count, lost_date,
+                is_frozen, frozen_count
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id) DO UPDATE SET
                 count = excluded.count,
                 last_active = excluded.last_active,
@@ -143,7 +151,9 @@ async def save_streak(streak: Streak) -> None:
                 restore_uses_month = excluded.restore_uses_month,
                 restore_uses_count = excluded.restore_uses_count,
                 last_lost_count = excluded.last_lost_count,
-                lost_date = excluded.lost_date
+                lost_date = excluded.lost_date,
+                is_frozen = excluded.is_frozen,
+                frozen_count = excluded.frozen_count
             """,
             (
                 streak.guild_id, streak.user_id, streak.count,
@@ -154,6 +164,7 @@ async def save_streak(streak: Streak) -> None:
                 streak.restore_uses_month, streak.restore_uses_count,
                 streak.last_lost_count,
                 streak.lost_date.isoformat() if streak.lost_date else None,
+                int(streak.is_frozen), streak.frozen_count,
             ),
         )
         await db.commit()
@@ -165,7 +176,7 @@ async def list_active_streaks(guild_id: int, today: date, limit: int = 15) -> li
         async with db.execute(
             """
             SELECT * FROM streaks
-            WHERE guild_id = ? AND count > 0 AND last_active IN (?, ?)
+            WHERE guild_id = ? AND count > 0 AND (last_active IN (?, ?) OR is_frozen = 1)
             ORDER BY count DESC, user_id ASC
             LIMIT ?
             """,

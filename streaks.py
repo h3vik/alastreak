@@ -5,8 +5,7 @@ from datetime import date, timedelta
 
 from db import Streak
 
-# Регулярка теперь ищет эмодзи и цифру В КОНЦЕ ника (с пробелом перед ними)
-STREAK_SUFFIX_RE = re.compile(r"\s+[🔥⚡💎🏆👑🔘❌]\s*\d+$")
+STREAK_SUFFIX_RE = re.compile(r"\s+[🔥⚡💎🏆👑🔘❌❄️]\s*\d+$")
 
 MILESTONES = (
     (200, "👑"),
@@ -36,7 +35,6 @@ def next_milestone(count: int) -> tuple[int, str] | None:
 
 
 def strip_prefix(name: str) -> str:
-    # Теперь функция отрезает суффикс (в конце), а не префикс
     return STREAK_SUFFIX_RE.sub("", name, count=1).strip()
 
 
@@ -45,10 +43,11 @@ def format_nickname(base_name: str, count: int, state: str = "active") -> str:
         suffix = f" ❌{count}"
     elif state == "unlit":
         suffix = f" 🔘{count}"
+    elif state == "frozen":
+        suffix = f" ❄️{count}"
     else:
         suffix = f" {emoji_for(count)}{count}"
         
-    # Ограничиваем длину ника (в Discord максимум 32 символа)
     remaining = NICK_LIMIT - len(suffix)
     trimmed = base_name[:remaining].rstrip() if remaining > 0 else ""
     return f"{trimmed}{suffix}"
@@ -99,6 +98,10 @@ def add_progress(
     messages: int = 0,
     voice_seconds: int = 0,
 ) -> tuple[Streak, bool]:
+    # Если заморожен, прогресс не добавляется
+    if streak.is_frozen:
+        return streak, False
+        
     roll_progress_day(streak, today)
     streak.messages_today += messages
     streak.voice_seconds_today += voice_seconds
@@ -136,6 +139,8 @@ def reset_streak(streak: Streak, today_date: date) -> Streak:
     streak.progress_date = None
     streak.messages_today = 0
     streak.voice_seconds_today = 0
+    streak.is_frozen = False
+    streak.frozen_count = 0
     return streak
 
 

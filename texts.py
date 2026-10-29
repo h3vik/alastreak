@@ -63,6 +63,7 @@ COMMANDS = {
     "setstreakrole": "Настроить выдачу роли за количество дней (админы)",
     "delstreakrole": "Удалить награду-роль (админы)",
     "roleslist": "Посмотреть все настроенные награды за стрики",
+    "streakunbound": "Заморозить стрик с утечкой по 1 огоньку в день",
 }
 
 PARAMS = {
@@ -91,6 +92,7 @@ NAMES_RU = {
     "setstreakrole": "настройкароли",
     "delstreakrole": "удалитьроль",
     "roleslist": "списокролей",
+    "streakunbound": "заморозка",
 }
 
 def flames_word(count: int) -> str:

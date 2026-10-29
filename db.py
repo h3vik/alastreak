@@ -18,8 +18,8 @@ _NEW_COLUMNS = (
     ("restore_uses_count", "INTEGER NOT NULL DEFAULT 0"),
     ("last_lost_count", "INTEGER NOT NULL DEFAULT 0"),
     ("lost_date", "TEXT"),
-    ("is_frozen", "INTEGER NOT NULL DEFAULT 0"), # НОВОЕ
-    ("frozen_count", "INTEGER NOT NULL DEFAULT 0"), # НОВОЕ
+    ("is_frozen", "INTEGER NOT NULL DEFAULT 0"),
+    ("frozen_count", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 @dataclass
@@ -36,8 +36,8 @@ class Streak:
     restore_uses_count: int = 0
     last_lost_count: int = 0
     lost_date: date | None = None
-    is_frozen: bool = False # НОВОЕ
-    frozen_count: int = 0 # НОВОЕ
+    is_frozen: bool = False
+    frozen_count: int = 0
 
 @dataclass
 class GuildSettings:

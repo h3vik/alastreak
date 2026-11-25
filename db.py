@@ -20,6 +20,7 @@ _NEW_COLUMNS = (
     ("lost_date", "TEXT"),
     ("is_frozen", "INTEGER NOT NULL DEFAULT 0"),
     ("frozen_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("custom_emoji", "TEXT"),
 )
 
 @dataclass
@@ -38,6 +39,7 @@ class Streak:
     lost_date: date | None = None
     is_frozen: bool = False
     frozen_count: int = 0
+    custom_emoji: str | None = None
 
 @dataclass
 class GuildSettings:
@@ -64,6 +66,7 @@ async def init() -> None:
                 lost_date TEXT,
                 is_frozen INTEGER NOT NULL DEFAULT 0,
                 frozen_count INTEGER NOT NULL DEFAULT 0,
+                custom_emoji TEXT,
                 PRIMARY KEY (guild_id, user_id)
             )
             """
@@ -73,7 +76,7 @@ async def init() -> None:
         for name, definition in _NEW_COLUMNS:
             if name not in existing:
                 await db.execute(f"ALTER TABLE streaks ADD COLUMN {name} {definition}")
-        
+
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS guild_settings (
@@ -115,6 +118,7 @@ def streak_from_row(row: aiosqlite.Row) -> Streak:
         lost_date=_parse_date(row["lost_date"]) if "lost_date" in keys else None,
         is_frozen=bool(row["is_frozen"]) if "is_frozen" in keys else False,
         frozen_count=int(row["frozen_count"] or 0) if "frozen_count" in keys else 0,
+        custom_emoji=row["custom_emoji"] if "custom_emoji" in keys else None,
     )
 
 async def get_streak(guild_id: int, user_id: int) -> Streak:
@@ -138,9 +142,9 @@ async def save_streak(streak: Streak) -> None:
                 guild_id, user_id, count, last_active, nickname_visible,
                 progress_date, messages_today, voice_seconds_today,
                 restore_uses_month, restore_uses_count, last_lost_count, lost_date,
-                is_frozen, frozen_count
+                is_frozen, frozen_count, custom_emoji
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id) DO UPDATE SET
                 count = excluded.count,
                 last_active = excluded.last_active,
@@ -153,7 +157,8 @@ async def save_streak(streak: Streak) -> None:
                 last_lost_count = excluded.last_lost_count,
                 lost_date = excluded.lost_date,
                 is_frozen = excluded.is_frozen,
-                frozen_count = excluded.frozen_count
+                frozen_count = excluded.frozen_count,
+                custom_emoji = excluded.custom_emoji
             """,
             (
                 streak.guild_id, streak.user_id, streak.count,
@@ -165,6 +170,7 @@ async def save_streak(streak: Streak) -> None:
                 streak.last_lost_count,
                 streak.lost_date.isoformat() if streak.lost_date else None,
                 int(streak.is_frozen), streak.frozen_count,
+                streak.custom_emoji,
             ),
         )
         await db.commit()
@@ -190,7 +196,7 @@ async def get_guild_settings(guild_id: int) -> GuildSettings:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM guild_settings WHERE guild_id = ?", (guild_id,)) as cursor:
             row = await cursor.fetchone()
-            
+
     if row is None:
         return GuildSettings(guild_id=guild_id, message_goal=3, voice_goal_seconds=180)
     return GuildSettings(guild_id=row["guild_id"], message_goal=row["message_goal"], voice_goal_seconds=row["voice_goal_seconds"])

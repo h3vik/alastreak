@@ -31,6 +31,9 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GUILD_ID = os.getenv("DISCORD_GUILD_ID", "").strip()
 
+# Роль(и), которой разрешено менять эмодзи стрика
+ALLOWED_EMOJI_ROLE_IDS = {1575223688431804576}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("streak-bot")
 
@@ -60,7 +63,7 @@ class StreakBot(commands.Bot):
         else:
             synced = await self.tree.sync()
             log.info("Synced %s global command(s)", len(synced))
-        
+
         credit_voice_loop.start()
         midnight_dimmer_loop.start()
         auto_backup_loop.start()
@@ -95,25 +98,25 @@ async def try_set_nickname(member: discord.Member, nick: str | None) -> bool:
 async def apply_nickname(member: discord.Member, streak, visible: bool) -> bool:
     base = base_display_name(member)
     now_date = today()
-    
+
     if not visible:
         current = member.nick
         if current and strip_prefix(current) != current:
             return await try_set_nickname(member, base)
         return True
-        
+
     if streak.is_frozen:
-        desired = format_nickname(base, streak.count, state="frozen")
+        desired = format_nickname(base, streak.count, state="frozen", custom_emoji=streak.custom_emoji)
     elif streak.count <= 0:
         if is_streak_restorable(streak, now_date):
-            desired = format_nickname(base, streak.last_lost_count, state="lost")
+            desired = format_nickname(base, streak.last_lost_count, state="lost", custom_emoji=streak.custom_emoji)
         else:
             desired = base
     else:
         is_done_today = streak.last_active == now_date
         state = "active" if is_done_today else "unlit"
-        desired = format_nickname(base, streak.count, state=state)
-        
+        desired = format_nickname(base, streak.count, state=state, custom_emoji=streak.custom_emoji)
+
     if member.nick == desired:
         return True
     return await try_set_nickname(member, desired)
@@ -124,7 +127,7 @@ async def check_streak_rewards(member: discord.Member, streak):
     roles_dict = await db.get_all_streak_roles(member.guild.id)
     if not roles_dict:
         return
-        
+
     for days, role_ids in roles_dict.items():
         if streak.count == days:
             for role_id in role_ids:
@@ -138,19 +141,19 @@ async def check_streak_rewards(member: discord.Member, streak):
 async def record_progress(member: discord.Member, *, messages: int = 0, voice_seconds: int = 0) -> None:
     settings = await db.get_guild_settings(member.guild.id)
     streak = await db.get_streak(member.guild.id, member.id)
-    
+
     old_last_active = streak.last_active
     streak, changed = add_progress(
         streak, today(), settings.message_goal, settings.voice_goal_seconds,
         messages=messages, voice_seconds=voice_seconds,
     )
     await db.save_streak(streak)
-    
+
     if changed and streak.nickname_visible:
         await apply_nickname(member, streak, True)
     elif not changed and old_last_active != today() and streak.nickname_visible:
         await apply_nickname(member, streak, True)
-        
+
     if changed:
         await check_streak_rewards(member, streak)
 
@@ -178,7 +181,7 @@ def progress_lines(streak, msg_goal: int, voice_goal: int) -> str:
     else:
         messages, voice = streak.messages_today, streak.voice_seconds_today
     done = streak.last_active == today()
-    
+
     lines = [texts.TODAY_PROGRESS.format(messages=messages, message_goal=msg_goal, voice=texts.format_voice(voice), voice_goal=texts.format_voice(voice_goal))]
     if done:
         lines.append(texts.TODAY_DONE)
@@ -193,7 +196,7 @@ def streak_text(streak, msg_goal: int, voice_goal: int) -> str:
         else:
             body = texts.NO_STREAK
     else:
-        lines = [texts.STREAK_COUNT.format(emoji=emoji_for(count), count=count, flames=texts.flames_word(count))]
+        lines = [texts.STREAK_COUNT.format(emoji=streak.custom_emoji or emoji_for(count), count=count, flames=texts.flames_word(count))]
         nxt = next_milestone(count)
         if nxt:
             lines.append(texts.NEXT_EMOJI.format(emoji=nxt[1], count=nxt[0]))
@@ -292,19 +295,19 @@ async def unbound_decay_loop() -> None:
         conn.row_factory = aiosqlite.Row
         async with conn.execute("SELECT * FROM streaks WHERE is_frozen = 1") as cursor:
             rows = await cursor.fetchall()
-            
+
         for row in rows:
             streak = db.streak_from_row(row)
             if streak.progress_date != now_date:
                 streak.count -= 1
                 streak.progress_date = now_date
-                
+
                 if streak.count <= 0:
                     streak.is_frozen = False
                     streak.count = 0
-                    
+
                 await db.save_streak(streak)
-                
+
                 guild = bot.get_guild(streak.guild_id)
                 if guild:
                     member = guild.get_member(streak.user_id)
@@ -322,7 +325,7 @@ async def auto_backup_loop() -> None:
     DATA_DIR = os.getenv("DATA_DIR", ".")
     db_path = Path(DATA_DIR) / "streaks.db"
     backup_dir = Path(DATA_DIR) / "backups"
-    
+
     backup_dir.mkdir(exist_ok=True)
     today_str = datetime.now().strftime("%Y-%m-%d")
     backup_path = backup_dir / f"streaks_backup_{today_str}.db"
@@ -390,10 +393,10 @@ class UnboundView(discord.ui.View):
             self.streak.progress_date = today()
         else:
             self.streak.last_active = today()
-            
+
         await db.save_streak(self.streak)
         await apply_nickname(self.member, self.streak, self.streak.nickname_visible)
-        
+
         self.update_buttons()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
@@ -402,14 +405,14 @@ async def unbound_command(interaction: discord.Interaction) -> None:
     if interaction.guild is None:
         await interaction.response.send_message(guild_only_response(), ephemeral=True)
         return
-        
+
     member = interaction.user
     streak = await db.get_streak(interaction.guild.id, member.id)
-    
+
     if streak.count <= 0:
         await interaction.response.send_message("У вас нет активного стрика, который можно заморозить.", ephemeral=True)
         return
-        
+
     view = UnboundView(streak, member)
     await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
 
@@ -441,7 +444,7 @@ class LeaderboardView(discord.ui.View):
                 name = f"**{clean_name}**"
             else:
                 name = f"`{streak.user_id}`"
-                
+
             frozen_icon = " ❄️" if streak.is_frozen else ""
             lines.append(f"**{i}.** {emoji_for(streak.count)} **{streak.count}**{frozen_icon} — {name}")
 
@@ -477,9 +480,9 @@ async def leaderboard_command(interaction: discord.Interaction) -> None:
         await interaction.response.send_message(guild_only_response(), ephemeral=True)
         return
     await interaction.response.defer()
-    
+
     entries = await db.list_active_streaks(interaction.guild.id, today(), limit=1000)
-    
+
     if not entries:
         await interaction.followup.send(texts.LEADERBOARD_EMPTY)
         return
@@ -496,8 +499,8 @@ async def streak_command(interaction: discord.Interaction, user: discord.Member 
     target = user or interaction.user
     settings = await db.get_guild_settings(interaction.guild.id)
     streak = await db.get_streak(interaction.guild.id, target.id)
-    emoji = emoji_for(streak.count) if streak.count else "🔥"
-    
+    emoji = streak.custom_emoji or (emoji_for(streak.count) if streak.count else "🔥")
+
     if target.id == interaction.user.id:
         body = streak_text(streak, settings.message_goal, settings.voice_goal_seconds)
     elif streak.count <= 0:
@@ -537,7 +540,7 @@ async def showstreak_command(interaction: discord.Interaction) -> None:
         return
     updated = await apply_nickname(member, streak, True)
     if updated:
-        await interaction.response.send_message(texts.SHOWN.format(emoji=emoji_for(streak.count), count=streak.count), ephemeral=True)
+        await interaction.response.send_message(texts.SHOWN.format(emoji=streak.custom_emoji or emoji_for(streak.count), count=streak.count), ephemeral=True)
         return
     await interaction.response.send_message(f"{streak_text(streak, 3, 180)}\n{texts.NICK_PERMISSION}", ephemeral=True)
 
@@ -563,7 +566,7 @@ async def setstreak_command(interaction: discord.Interaction, user: discord.Memb
         settings = await db.get_guild_settings(interaction.guild.id)
         streak.messages_today = settings.message_goal
         streak.voice_seconds_today = 0
-        body = texts.SET_VALUE.format(mention=user.mention, emoji=emoji_for(streak.count), count=streak.count)
+        body = texts.SET_VALUE.format(mention=user.mention, emoji=streak.custom_emoji or emoji_for(streak.count), count=streak.count)
     await db.save_streak(streak)
     nick_ok = await apply_nickname(user, streak, streak.nickname_visible)
     if not nick_ok:
@@ -644,11 +647,45 @@ async def restorestreak_command(interaction: discord.Interaction) -> None:
     streak.voice_seconds_today = 0
     await db.save_streak(streak)
     nick_ok = await apply_nickname(member, streak, streak.nickname_visible)
-    body = texts.RESTORE_USED.format(emoji=emoji_for(streak.count), count=streak.count, flames=texts.flames_word(streak.count))
+    body = texts.RESTORE_USED.format(emoji=streak.custom_emoji or emoji_for(streak.count), count=streak.count, flames=texts.flames_word(streak.count))
     body += "\n" + texts.RESTORE_LIMIT_INFO.format(left=restores_left(streak, now_date), total=RESTORES_PER_MONTH)
     if not nick_ok:
         body += f"\n{texts.NICK_PERMISSION}"
     await interaction.response.send_message(body, ephemeral=True)
+
+@ru_command("streakemoji")
+@app_commands.describe(emoji=texts.PARAMS["emoji"])
+async def streakemoji_command(interaction: discord.Interaction, emoji: str | None = None) -> None:
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(guild_only_response(), ephemeral=True)
+        return
+
+    member = interaction.user
+    if not any(r.id in ALLOWED_EMOJI_ROLE_IDS for r in member.roles):
+        await interaction.response.send_message(texts.EMOJI_NO_ROLE, ephemeral=True)
+        return
+
+    if emoji is not None:
+        emoji = emoji.strip()
+        if not emoji:
+            emoji = None
+        else:
+            # 1–3 эмодзи (по code points), без пробелов и цифр
+            if len(emoji) > 3 or any(ch.isspace() or ch.isdigit() for ch in emoji):
+                await interaction.response.send_message(texts.EMOJI_INVALID, ephemeral=True)
+                return
+
+    streak = await db.get_streak(interaction.guild.id, member.id)
+    streak.custom_emoji = emoji
+    await db.save_streak(streak)
+
+    if streak.nickname_visible and streak.count > 0:
+        await apply_nickname(member, streak, True)
+
+    if emoji is None:
+        await interaction.response.send_message(texts.EMOJI_RESET, ephemeral=True)
+    else:
+        await interaction.response.send_message(texts.EMOJI_SET.format(emoji=emoji), ephemeral=True)
 
 @ru_command("setmsggoal")
 @app_commands.describe(amount=texts.PARAMS["set_msg_amount"])

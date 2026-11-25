@@ -5,9 +5,8 @@ from datetime import date, timedelta
 
 from db import Streak
 
-# ИСПРАВЛЕННАЯ РЕГУЛЯРКА: Теперь она ищет один или несколько суффиксов подряд (благодаря знаку +)
-# и срезает их все до самого чистого ника.
-STREAK_SUFFIX_RE = re.compile(r"(\s+[🔥⚡💎🏆👑🔘❌❄️]\s*\d+)+$")
+# Срезаем любые суффиксы вида "<эмодзи><число>" с конца, не только стандартные.
+STREAK_SUFFIX_RE = re.compile(r"(\s+[^\s\d]{1,6}\s*\d+)+$")
 
 MILESTONES = (
     (200, "👑"),
@@ -37,11 +36,10 @@ def next_milestone(count: int) -> tuple[int, str] | None:
 
 
 def strip_prefix(name: str) -> str:
-    # Отрезает все наслоившиеся суффиксы с конца
     return STREAK_SUFFIX_RE.sub("", name).strip()
 
 
-def format_nickname(base_name: str, count: int, state: str = "active") -> str:
+def format_nickname(base_name: str, count: int, state: str = "active", custom_emoji: str | None = None) -> str:
     if state == "lost":
         suffix = f" ❌{count}"
     elif state == "unlit":
@@ -49,8 +47,9 @@ def format_nickname(base_name: str, count: int, state: str = "active") -> str:
     elif state == "frozen":
         suffix = f" ❄️{count}"
     else:
-        suffix = f" {emoji_for(count)}{count}"
-        
+        emoji = custom_emoji or emoji_for(count)
+        suffix = f" {emoji}{count}"
+
     remaining = NICK_LIMIT - len(suffix)
     trimmed = base_name[:remaining].rstrip() if remaining > 0 else ""
     return f"{trimmed}{suffix}"
@@ -103,17 +102,17 @@ def add_progress(
 ) -> tuple[Streak, bool]:
     if streak.is_frozen:
         return streak, False
-        
+
     roll_progress_day(streak, today)
     streak.messages_today += messages
     streak.voice_seconds_today += voice_seconds
-    
+
     if not qualifies_today(streak, msg_goal, voice_goal):
         return streak, False
-        
+
     if streak.last_active is None:
         return apply_qualification(streak, today)
-        
+
     delta = (today - streak.last_active).days
     if delta > 1:
         if streak.count > 0:
@@ -124,7 +123,7 @@ def add_progress(
                 streak.last_lost_count = streak.count
                 streak.lost_date = streak.last_active + timedelta(days=1)
         return apply_qualification(streak, today)
-        
+
     return apply_qualification(streak, today)
 
 
@@ -135,7 +134,7 @@ def reset_streak(streak: Streak, today_date: date) -> Streak:
     else:
         streak.last_lost_count = 0
         streak.lost_date = None
-        
+
     streak.count = 0
     streak.last_active = None
     streak.progress_date = None
